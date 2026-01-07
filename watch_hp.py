@@ -9,7 +9,7 @@ import lol   # 你的主逻辑文件
 
 SCREENSHOT_PATH = "screen.png"
 BBOX_PATH = "bbox.txt"
-INTERVAL = 1.0   # 秒
+INTERVAL = 1   # 秒
 
 
 def capture_screen(save_path):
@@ -130,7 +130,7 @@ def health_loop(hud: HealthHUD):
             if health_rate is None:
                 print(f"[{now}] HP: N/A")
             else:
-                print(f"[{now}] HP: {health_rate:.1%} ({health_rate * 100:.2f}%)")
+                print(f"[{now}] HP: {health_rate:.1%}")
 
             # 5️⃣ 控制频率
             elapsed = time.time() - start
