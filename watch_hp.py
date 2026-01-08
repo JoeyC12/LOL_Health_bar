@@ -3,20 +3,24 @@ import threading
 from datetime import datetime
 from PIL import ImageGrab
 import tkinter as tk
+import numpy as np
+import cv2
 
 import lol   # 你的主逻辑文件
 
 
 SCREENSHOT_PATH = "screen.png"
 BBOX_PATH = "bbox.txt"
-INTERVAL = 1   # 秒
+INTERVAL = 0  # 秒
 
 
-def capture_screen(save_path):
+def capture_screen(save_path, save_to_file=True):
     """
     只截右侧副屏（逻辑坐标）
     主屏: 1470 x 956
     副屏: 1920 x 1080
+    
+    save_to_file: 是否保存到文件（False时只返回PIL Image，避免文件IO）
     """
     MAIN_W = 1470
     SIDE_W = 1920
@@ -30,7 +34,9 @@ def capture_screen(save_path):
     )
 
     img = ImageGrab.grab(bbox=bbox)
-    img.save(save_path)
+    if save_to_file:
+        img.save(save_path)
+    return img
 
 
 
@@ -47,9 +53,19 @@ class HealthHUD:
         self.root.overrideredirect(True)          # 无边框 HUD
 
         # 窗口大小 + 位置（左上角）
-        self.root.geometry("220x70+20+40")
+        self.root.geometry("220x100+20+40")
 
-        # UI
+        # UI - 具体血量显示（左上角）
+        self.health_text_label = tk.Label(
+            self.root,
+            text="--/--",
+            font=("Menlo", 16, "bold"),
+            fg="white",
+            bg="#141414"
+        )
+        self.health_text_label.pack(pady=(5, 0))
+
+        # UI - 百分比显示
         self.label = tk.Label(
             self.root,
             text="HP: --",
@@ -65,13 +81,17 @@ class HealthHUD:
 
         self.running = True
 
-    def update_health(self, health_rate):
-        """更新血量显示（线程安全）"""
+    def update_health(self, health_data):
+        """更新血量显示（线程安全）
+        health_data: (health_rate, health_text) 或 None
+        """
         try:
-            if health_rate is None:
+            if health_data is None:
+                health_text = "--/--"
                 text = "HP: N/A"
                 color = "red"
             else:
+                health_rate, health_text = health_data
                 # 显示百分比，保留1位小数
                 text = f"HP: {health_rate * 100:.1f}%"
                 if health_rate < 0.3:
@@ -81,6 +101,9 @@ class HealthHUD:
                 else:
                     color = "lime"
 
+            # 更新具体血量显示
+            self.health_text_label.config(text=health_text)
+            # 更新百分比显示
             self.label.config(text=text, fg=color)
             # 强制更新显示
             self.root.update_idletasks()
@@ -111,31 +134,35 @@ def health_loop(hud: HealthHUD):
         try:
             start = time.time()
 
-            # 1️⃣ 截屏
-            capture_screen(SCREENSHOT_PATH)
+            # 1️⃣ 截屏（不保存文件，直接传numpy数组）
+            img_pil = capture_screen(SCREENSHOT_PATH, save_to_file=False)
+            # 转换为numpy数组（BGR格式，OpenCV使用）
+            img_array = np.array(img_pil)
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
-            # 2️⃣ 血量检测
-            health_rate = lol.extract_health_rate_from_image(
-                image_path=SCREENSHOT_PATH,
+            # 2️⃣ 血量检测（直接传数组，避免文件IO）
+            result = lol.extract_health_rate_from_image(
+                image_array=img_array,
                 bbox_save_path=BBOX_PATH,
                 debug=False
             )
 
             # 3️⃣ 更新 HUD（线程安全）
             if hud.running:  # 确保窗口还在运行
-                hud.root.after(0, hud.update_health, health_rate)
+                hud.root.after(0, hud.update_health, result)
 
             # 4️⃣ 日志
             now = datetime.now().strftime("%H:%M:%S")
-            if health_rate is None:
+            if result is None:
                 print(f"[{now}] HP: N/A")
             else:
-                print(f"[{now}] HP: {health_rate:.1%}")
+                health_rate, health_text = result
+                print(f"[{now}] HP: {health_rate:.1%} ({health_text})")
 
             # 5️⃣ 控制频率
             elapsed = time.time() - start
             sleep_time = max(0.05, INTERVAL - elapsed)
-            time.sleep(sleep_time)
+            # time.sleep(sleep_time)
             
         except Exception as e:
             # 错误处理，避免程序崩溃
