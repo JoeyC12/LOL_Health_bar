@@ -52,8 +52,12 @@ class HealthHUD:
         self.root.attributes("-alpha", 0.88)     # 半透明
         self.root.overrideredirect(True)          # 无边框 HUD
 
-        # 窗口大小 + 位置（左上角）
-        self.root.geometry("220x100+20+40")
+        # 窗口大小 + 位置（副屏左上角）
+        # 主屏宽度 1470，副屏从 x=1470 开始
+        MAIN_W = 1470
+        WINDOW_X = MAIN_W + 20  # 副屏左上角，留 20px 边距
+        WINDOW_Y = 40           # 顶部留 40px 边距
+        self.root.geometry(f"220x100+{WINDOW_X}+{WINDOW_Y}")
 
         # UI - 具体血量显示（左上角）
         self.health_text_label = tk.Label(
