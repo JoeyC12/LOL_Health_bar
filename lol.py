@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 import re
 from paddleocr import PaddleOCR
+import time
 
 # =========================================================
 # 全局OCR实例（只初始化一次，大幅提升性能）
@@ -139,8 +140,8 @@ def extract_health_text_from_roi(roi, debug=False, show_all_text=False):
                 
                 all_texts.append((text, conf))
 
-                if debug or show_all_text:
-                    print(f"[Health] OCR detected: '{text}' conf={conf:.3f}")
+                # if debug or show_all_text:
+                #     print(f"[Health] OCR detected: '{text}' conf={conf:.3f}")
 
                 if '/' not in text:
                     if debug or show_all_text:
@@ -162,7 +163,7 @@ def extract_health_text_from_roi(roi, debug=False, show_all_text=False):
                 health_bbox_roi = (x_min, y_min, x_max, y_max)
 
                 if debug or show_all_text:
-                    print(f"[Health] Found valid health text '{health_text}' conf={conf:.3f}")
+                    print(f"[Health] Found valid health text '{health_text}'")
                 break
             except Exception as e:
                 if debug or show_all_text:
@@ -256,7 +257,8 @@ def extract_health_rate_from_image(
     image_path: str = None,
     image_array: np.ndarray = None,
     bbox_save_path: str = "bbox.txt",
-    debug: bool = False
+    debug: bool = False,
+    cached_bbox_adjusted: tuple = None
 ):
     """
     输入 image_path 或 image_array (numpy array)
@@ -282,18 +284,24 @@ def extract_health_rate_from_image(
     # 尝试使用缓存的 bbox
     cached_bbox = load_cached_bbox(bbox_save_path)
     if cached_bbox is not None:
-        result = _ocr_with_bbox(img, cached_bbox, debug)
+        # 如果提供了调整后的bbox（说明截屏时只截取了该区域），使用调整后的坐标
+        bbox_to_use = cached_bbox_adjusted if cached_bbox_adjusted is not None else cached_bbox
+        t0 = time.time()
+        result = _ocr_with_bbox(img, bbox_to_use, debug)
+        elapsed = (time.time() - t0) * 1000
+        # print(f"[Timing] _ocr_with_bbox: {elapsed:.2f} ms")
         if result is not None:
             health_rate, health_text = result
             if debug:
                 print(f"[Health] Cached bbox success, Rate = {health_rate:.2%}")
             return health_rate, health_text
-        # 缓存失败，删除 bbox 文件
+        # 缓存失败，但不删除bbox.txt，也不重新检测，直接返回None
+        # bbox.txt永远保持第一次成功检测的结果
         if debug:
-            print("[Health] Cached bbox failed, deleting bbox.txt")
-        delete_bbox(bbox_save_path)
+            print("[Health] Cached bbox OCR failed, but keeping bbox.txt (no re-detection)")
+        return None
 
-    # 运行完整的边缘检测
+    # 运行完整的边缘检测（只在第一次，没有缓存时运行）
     hp_bar_bbox, step4_data = detect_hp_bar_by_edge(img, save_debug_images=debug)
     if hp_bar_bbox is None:
         return None
@@ -358,8 +366,14 @@ def extract_health_rate_from_image(
         int(y2 + height * 0.2),
     )
 
-    # 保存扩展后的文本 bbox
-    save_bbox(bbox_save_path, expanded_bbox)
+    # 保存扩展后的文本 bbox（只在第一次成功时保存，如果已存在则不覆盖）
+    if not os.path.exists(bbox_save_path):
+        save_bbox(bbox_save_path, expanded_bbox)
+        if debug:
+            print(f"[Health] Saved bbox for first time: {expanded_bbox}")
+    else:
+        if debug:
+            print(f"[Health] Bbox already exists, keeping original (not updating)")
 
     # 只在debug模式下保存可视化结果图
     if debug:
@@ -374,8 +388,8 @@ def extract_health_rate_from_image(
                     (health_bbox_full[0], health_bbox_full[1] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.imwrite("hp_result_with_text.png", result_img)
-        print(f"[Health] Saved bbox: {expanded_bbox} (text: '{health_text}', original: {health_bbox_full}, width: {width})")
-        print(f"[Health] Full detection success, Rate = {health_rate:.2%}")
+        # print(f"[Health] Saved bbox: {expanded_bbox} (text: '{health_text}', original: {health_bbox_full}, width: {width})")
+        # print(f"[Health] Full detection success, Rate = {health_rate:.2%}")
 
     return health_rate, health_text
 
@@ -394,27 +408,30 @@ def _ocr_with_bbox(img, text_bbox, debug=False):
             print(f"[Health] Bbox out of bounds: bbox=({x1},{y1},{x2},{y2}), image=({W},{H})")
         return None
     
-    # 提取文本区域（已扩展的 bbox）- 使用视图而不是copy
-    roi = img[y1:y2, x1:x2]
+    # 提取文本区域（已扩展的 bbox）
+    roi = img[y1:y2, x1:x2].copy()  # 需要copy，避免视图问题
     if roi.size == 0:
-        if debug:
-            print(f"[Health] Bbox is invalid: bbox=({x1},{y1},{x2},{y2})")
+        print(f"[Health] Bbox is invalid: bbox=({x1},{y1},{x2},{y2}), image_size={img.shape[:2]}")
         return None
     
+    if debug:
+        print(f"[Health] Extracted ROI: bbox=({x1},{y1},{x2},{y2}), roi_size={roi.shape}")
+    
     # OCR 识别（在扩展后的区域内查找文本）
-    health_text, _ = extract_health_text_from_roi(roi, debug=False, show_all_text=debug)
+    health_text, _ = extract_health_text_from_roi(roi, debug=debug, show_all_text=debug)
     if health_text is None:
         if debug:
-            print(f"[Health] OCR failed: no valid health text found in cached bbox (bbox={text_bbox})")
+            print(f"[Health] OCR failed: no valid health text found in cached bbox (bbox={text_bbox}, image_size={img.shape[:2]})")
             # 保存失败的 ROI 用于调试
             cv2.imwrite("hp_ocr_failed_roi.png", roi)
-            print(f"[Health] Saved failed ROI to hp_ocr_failed_roi.png")
+            print(f"[Health] Saved failed ROI to hp_ocr_failed_roi.png (size: {roi.shape})")
         return None
     
     # 计算血量百分比
     health_rate = calculate_health_rate(health_text)
     if health_rate is None:
-        print(f"[Health] Failed to calculate health rate from text: {health_text}")
+        if debug:
+            print(f"[Health] Failed to calculate health rate from text: {health_text}")
         return None
     
     return health_rate, health_text
